@@ -1,0 +1,8 @@
+{
+  "name": "Apni Suraksha - Women Safety App",
+  "description": "An AI-powered women's safety application that provides emergency SOS, live location tracking, voice/shake detection, safety tips, and a chatbot assistant to ensure safety in emergencies.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone"
+  ]
+}
