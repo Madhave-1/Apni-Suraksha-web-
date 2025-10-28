@@ -6,6 +6,7 @@ import * as geminiService from '../services/geminiService';
 import Chatbot from './Chatbot';
 import { auth } from '../firebase';
 import { signOut } from 'firebase/auth';
+import 'leaflet-geometryutil';
 
 // Declare Leaflet's global variable `L` to TypeScript.
 // This assumes leaflet.js is loaded via a script tag in the HTML.
@@ -55,6 +56,15 @@ const HomeScreen: React.FC<{ location: GeolocationCoordinates | null }> = ({ loc
     );
 };
 
+// Helper function to check for line segment intersection
+const lineIntersects = (p1: any, p2: any, p3: any, p4: any) => {
+    function CCW(p1: any, p2: any, p3: any) {
+        return (p3.lat - p1.lat) * (p2.lng - p1.lng) > (p2.lat - p1.lat) * (p3.lng - p1.lng);
+    }
+    return (CCW(p1, p3, p4) !== CCW(p2, p3, p4)) && (CCW(p1, p2, p3) !== CCW(p1, p2, p4));
+};
+
+
 interface MapScreenProps {
     location: GeolocationCoordinates | null;
     triggerSOS: (location: GeolocationCoordinates | null, contextMessage?: string) => void;
@@ -70,6 +80,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ location, triggerSOS, routeToShow
     const safetyZoneLayers = useRef<any[]>([]);
     const routingControl = useRef<any | null>(null);
     const [currentRoute, setCurrentRoute] = useState<any | null>(null);
+    const [unsafeZones, setUnsafeZones] = useState<any[]>([]);
 
     const handleSaveRoute = () => {
         const routeName = prompt("Enter a name for this route:");
@@ -151,8 +162,12 @@ const MapScreen: React.FC<MapScreenProps> = ({ location, triggerSOS, routeToShow
             // Clear previous zones
             safetyZoneLayers.current.forEach(layer => layer.remove());
             safetyZoneLayers.current = [];
+            const newUnsafeZones: any[] = [];
 
-            if (!incidents || incidents.length === 0) return;
+            if (!incidents || incidents.length === 0) {
+                setUnsafeZones([]);
+                return;
+            }
 
             // Create a grid over the map view to analyze incident density
             const GRID_DIVISIONS = 10;
@@ -174,10 +189,10 @@ const MapScreen: React.FC<MapScreenProps> = ({ location, triggerSOS, routeToShow
                     });
 
                     if (incidentsInCell.length > 0) {
-                        let color = '#FACC15'; // Hex for yellow-400, matches legend
-                        // Simple threshold for risk level
+                        let color = '#FACC15';
                         if (incidentsInCell.length > 2) {
-                             color = '#EF4444'; // Hex for red-500, matches legend
+                            color = '#EF4444';
+                            newUnsafeZones.push(cellBounds);
                         }
                         
                         const zone = L.rectangle(cellBounds, {
@@ -190,6 +205,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ location, triggerSOS, routeToShow
                     }
                 }
             }
+            setUnsafeZones(newUnsafeZones);
         } catch (error) {
             console.error("Failed to fetch safety zone data:", error);
         }
@@ -363,16 +379,100 @@ const MapScreen: React.FC<MapScreenProps> = ({ location, triggerSOS, routeToShow
         }
     };
 
+    const findSafestRoute = () => {
+        if (!currentRoute || unsafeZones.length === 0) {
+            alert("No route or unsafe zones to analyze.");
+            return;
+        }
+
+        const routeCoordinates = currentRoute.coordinates;
+        let isUnsafe = false;
+
+        for (const zone of unsafeZones) {
+            for (let i = 0; i < routeCoordinates.length - 1; i++) {
+                const p1 = routeCoordinates[i];
+                const p2 = routeCoordinates[i + 1];
+
+                const zoneBounds = L.latLngBounds(zone);
+                const northEast = zoneBounds.getNorthEast();
+                const southWest = zoneBounds.getSouthWest();
+                const northWest = zoneBounds.getNorthWest();
+                const southEast = zoneBounds.getSouthEast();
+
+                if (lineIntersects(p1, p2, northWest, northEast) ||
+                    lineIntersects(p1, p2, northEast, southEast) ||
+                    lineIntersects(p1, p2, southEast, southWest) ||
+                    lineIntersects(p1, p2, southWest, northWest)) {
+                    isUnsafe = true;
+                    break;
+                }
+            }
+            if (isUnsafe) break;
+        }
+
+        if (isUnsafe) {
+            console.log("This route goes through a potentially unsafe area. Calculating a safer route...");
+
+            const intersectingZones = unsafeZones.filter(zone => {
+                for (let i = 0; i < routeCoordinates.length - 1; i++) {
+                    const p1 = routeCoordinates[i];
+                    const p2 = routeCoordinates[i + 1];
+                    const zoneBounds = L.latLngBounds(zone);
+                    const northEast = zoneBounds.getNorthEast();
+                    const southWest = zoneBounds.getSouthWest();
+                    const northWest = zoneBounds.getNorthWest();
+                    const southEast = zoneBounds.getSouthEast();
+
+                    if (lineIntersects(p1, p2, northWest, northEast) || lineIntersects(p1, p2, northEast, southEast) || lineIntersects(p1, p2, southEast, southWest) || lineIntersects(p1, p2, southWest, northWest)) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+
+            if (intersectingZones.length > 0) {
+                const startPoint = L.latLng(routeCoordinates[0]);
+                const endPoint = L.latLng(routeCoordinates[routeCoordinates.length - 1]);
+                const waypoints = [startPoint];
+
+                intersectingZones.forEach(zone => {
+                    const zoneBounds = L.latLngBounds(zone);
+                    const zoneCenter = zoneBounds.getCenter();
+                    if (L.GeometryUtil) {
+                        const bearing = L.GeometryUtil.bearing(zoneCenter, startPoint);
+                        const detourPoint1 = L.GeometryUtil.destination(zoneCenter, bearing + 45, 707);
+                        const detourPoint2 = L.GeometryUtil.destination(zoneCenter, bearing - 45, 707);
+                        waypoints.push(detourPoint1);
+                        waypoints.push(detourPoint2);
+                    }
+                });
+
+                waypoints.push(endPoint);
+                routingControl.current.setWaypoints(waypoints);
+            }
+        } else {
+            console.log("This route appears to be safe.");
+        }
+    };
+
     return (
         <div className="w-full h-full relative">
             <div ref={mapContainer} className="w-full h-full" />
              {currentRoute && (
-                <button
-                    onClick={handleSaveRoute}
-                    className="absolute z-[1000] bottom-20 left-1/2 -translate-x-1/2 bg-primary text-white px-6 py-3 rounded-full shadow-lg font-bold hover:bg-primary-dark transition-colors"
-                >
-                    Save Route
-                </button>
+                <div className="absolute z-[1000] bottom-20 left-1/2 -translate-x-1/2 flex space-x-2">
+                    <button
+                        onClick={handleSaveRoute}
+                        className="bg-primary text-white px-6 py-3 rounded-full shadow-lg font-bold hover:bg-primary-dark transition-colors"
+                    >
+                        Save Route
+                    </button>
+                    <button
+                        onClick={findSafestRoute}
+                        className="bg-green-500 text-white px-6 py-3 rounded-full shadow-lg font-bold hover:bg-green-600 transition-colors"
+                    >
+                        Find Safest Route
+                    </button>
+                </div>
             )}
             <button
                 onClick={handleRecenter}
